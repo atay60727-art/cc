@@ -19,6 +19,18 @@ import socket
 from keep_alive import keep_alive
 keep_alive()
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton
+)
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes
+)
+from telegram.constants import ParseMode
+
 # ==================== AYARLAR ====================
 BOT_TOKEN = "8892646618:AAENeCk8RylIWVlM-2xWgI8jZAu1IfaHQ8E"
 ADMIN_ID  = 8838777079
@@ -26,36 +38,17 @@ DB_FILE   = "cc_bot.db"
 FORCE_CHANNELS = []
 VIP_PRICE      = 50
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, ChatMember
-)
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler
-)
-from telegram.constants import ParseMode
-
-# ==================== AYARLAR ====================
-BOT_TOKEN = "8892646618:AAENeCk8RylIWVlM-2xWgI8jZAu1IfaHQ8E"
-ADMIN_ID  = 8838777079 # ⚠️ BURAYA SENİN TELEGRAM ID'Nİ YAZ (sadece o admin olacak)
-DB_FILE   = "cc_bot.db"
-FORCE_CHANNELS = []  # Ör: ["@kanal1", "@kanal2"]
-VIP_PRICE      = 50  # ₺
-
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ==================== EMOJI / RENK ====================
+# ==================== EMOJI ====================
 class E:
     OK="✅"; NO="❌"; WARN="⚠️"; VIP="💎"; USER="👤"; ADMIN="👑"
     MONEY="💰"; GIFT="🎁"; STAR="⭐"; FIRE="🔥"; CHART="📊"
     BELL="🔔"; LOCK="🔒"; KEY="🔑"; BOOK="📚"; CROWN="🏆"
     ROCKET="🚀"; HEART="❤️"; DIAMOND="💠"; BOLT="⚡"; TROPHY="🏅"
     CARD="💳"; CHECK="🔍"; FILE="📁"; LIST="📋"; BAN="🚫"
-    GEAR="⚙️"; LINK="🔗"; INFO="ℹ️"; SHIELD="🛡️"
+    GEAR="⚙️"; LINK="🔗"; INFO="ℹ️"; SHIELD="🛡️"; DICE="🎲"
 
 # ==================== VERİTABANI ====================
 def db_init():
@@ -226,6 +219,33 @@ def valid_expiry(mm, yy):
         return (y>now.year) or (y==now.year and m>=now.month)
     except: return False
 
+def generate_cc(bin_prefix, count=1):
+    """BIN'den rastgele CC üret. CVV 000 dahil her şey olabilir."""
+    results = []
+    bin_clean = re.sub(r'\D', '', bin_prefix)
+    if len(bin_clean) < 6:
+        return results
+    for _ in range(count):
+        # Toplam 16 hane olacak şekilde tamamla
+        total_len = 16
+        remaining = total_len - len(bin_clean) - 1  # son 1 hane luhn
+        if remaining < 1: remaining = 1
+        middle = ''.join(random.choices('0123456789', k=remaining))
+        base = bin_clean + middle
+        # Luhn için son haneyi hesapla
+        for last in '0123456789':
+            candidate = base + last
+            if luhn(candidate):
+                number = candidate
+                break
+        else:
+            number = base + '0'
+        mm = f"{random.randint(1,12):02d}"
+        yy = str(random.randint(2026, 2035))
+        cvv = f"{random.randint(0,999):03d}"  # 000 dahil
+        results.append(f"{number}|{mm}|{yy}|{cvv}")
+    return results
+
 def stripe_auth_check(cc, timeout=15):
     url = "https://api.stripe.com/v1/tokens"
     payload = {
@@ -286,25 +306,24 @@ def gateway_check(gw, ep, cc, timeout=12):
 def check_single_cc(cc_str, gateway_name="Stripe"):
     cc = parse_cc(cc_str)
     if not cc: return None
-    ep = GATEWAYS.get("1")[1]
+    ep = GATEWAYS["1"][1]
     for k,v in GATEWAYS.items():
         if v[0]==gateway_name: ep=v[1]; break
     r = gateway_check(gateway_name, ep, cc)
     r["cc"] = f"{cc['number']}|{cc['month']}|{cc['year']}|{cc['cvv']}"
     return r
 
-def check_multiple(cc_list, gateway_name, threads=20, progress_cb=None):
+def check_all_gateways(cc_str):
+    """Tüm gateway'lerde check yapar, en iyi sonucu döner."""
+    cc = parse_cc(cc_str)
+    if not cc: return None
     results = []
-    lock = threading.Lock()
-    def worker(i, cc_str):
-        r = check_single_cc(cc_str, gateway_name)
-        with lock:
-            results.append(r)
-            if progress_cb: progress_cb(i+1, len(cc_list))
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        for i, c in enumerate(cc_list):
-            ex.submit(worker, i, c)
-    return results
+    for k, (gw, ep) in GATEWAYS.items():
+        r = gateway_check(gw, ep, cc)
+        results.append(r)
+    rank = {"CHARGED":5,"LIVE":4,"UNKNOWN":3,"DEAD":2,"ERROR":1}
+    best = max(results, key=lambda x: rank.get(x["status"],0))
+    return {"best": best, "all": results}
 
 # ==================== KLAVYELER ====================
 def main_kb(uid):
@@ -312,7 +331,7 @@ def main_kb(uid):
         [KeyboardButton(f"{E.CARD} CC Checker"), KeyboardButton(f"{E.VIP} VIP Paneli")],
         [KeyboardButton(f"{E.USER} Profilim"), KeyboardButton(f"{E.MONEY} Bakiye")],
         [KeyboardButton(f"{E.GIFT} Günlük Bonus"), KeyboardButton(f"{E.ROCKET} Referans")],
-        [KeyboardButton(f"{E.BOOK} Yardım")],
+        [KeyboardButton(f"{E.DICE} Gen (BIN)"), KeyboardButton(f"{E.BOOK} Yardım")],
     ]
     if is_admin(uid):
         rows.append([KeyboardButton(f"{E.ADMIN} Admin Paneli")])
@@ -323,8 +342,8 @@ def cc_menu_kb():
         [InlineKeyboardButton(f"{E.CARD} Tekli Check", callback_data="cc_single"),
          InlineKeyboardButton(f"{E.FILE} Dosyadan Check", callback_data="cc_file")],
         [InlineKeyboardButton(f"{E.LIST} Çoklu Check", callback_data="cc_multi"),
-         InlineKeyboardButton(f"{E.GEAR} Gateway Seç", callback_data="cc_gateway")],
-        [InlineKeyboardButton(f"{E.VIP} VIP Mod (Tüm Gateway)", callback_data="cc_all"),
+         InlineKeyboardButton(f"{E.DICE} Gen (BIN)", callback_data="cc_gen")],
+        [InlineKeyboardButton(f"{E.GEAR} Gateway Seç", callback_data="cc_gateway"),
          InlineKeyboardButton(f"{E.NO} Kapat", callback_data="close")],
     ])
 
@@ -336,7 +355,8 @@ def gateway_kb():
         for k in keys[i:i+2]:
             row.append(InlineKeyboardButton(GATEWAYS[k][0], callback_data=f"gw_{k}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(f"{E.OK} Onayla", callback_data="gw_done")])
+    rows.append([InlineKeyboardButton(f"{E.OK} Tümü (15 Gateway)", callback_data="gw_all")])
+    rows.append([InlineKeyboardButton(f"{E.NO} Kapat", callback_data="close")])
     return InlineKeyboardMarkup(rows)
 
 def vip_kb():
@@ -377,16 +397,47 @@ async def start(update, ctx):
         f"{E.USER} Merhaba <b>{u.first_name}</b>!\n"
         f"{E.STAR} Durum: {vip}\n"
         f"{E.ROCKET} ID: <code>{u.id}</code>\n\n"
-        f"{E.CARD} CC Checker için aşağıdaki butona bas!\n"
-        f"{E.DIAMOND} VIP ile tüm gateway'lere eriş!"
+        f"{E.CARD} CC Checker için butona bas!\n"
+        f"{E.DICE} /gen komutu ile BIN'den CC üret!"
     )
     await update.message.reply_text(text, reply_markup=main_kb(u.id), parse_mode=ParseMode.HTML)
+
+async def gen_cmd(update, ctx):
+    """Kullanım: /gen 411111  veya  /gen 411111 10"""
+    if not await check_force_join(update, ctx): return
+    u = update.effective_user
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            f"{E.DICE} <b>Gen Komutu</b>\n\n"
+            f"Kullanım:\n"
+            f"<code>/gen 411111</code> → 1 CC\n"
+            f"<code>/gen 411111 10</code> → 10 CC\n\n"
+            f"{E.INFO} BIN en az 6 hane olmalı\n"
+            f"{E.INFO} CVV her şey olabilir (000 dahil)",
+            parse_mode=ParseMode.HTML); return
+    bin_prefix = args[0]
+    count = 1
+    if len(args) > 1:
+        try: count = min(int(args[1]), 50)
+        except: count = 1
+    bin_clean = re.sub(r'\D', '', bin_prefix)
+    if len(bin_clean) < 6:
+        await update.message.reply_text(f"{E.NO} BIN en az 6 hane olmalı!"); return
+    ccs = generate_cc(bin_clean, count)
+    if not ccs:
+        await update.message.reply_text(f"{E.NO} Üretilemedi!"); return
+    text = f"{E.DICE} <b>{count} CC Üretildi</b>\n\n<code>" + "\n".join(ccs) + "</code>"
+    if len(text) > 4000:
+        text = text[:4000] + "\n...</code>"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def help_cmd(update, ctx):
     text = (
         f"{E.BOOK} <b>Yardım Menüsü</b>\n\n"
         f"/start - Başlat\n"
         f"/cc - CC Checker\n"
+        f"/gen BIN [adet] - BIN'den CC üret\n"
         f"/vip - VIP paneli\n"
         f"/profil - Profil\n"
         f"/bonus - Günlük bonus\n"
@@ -403,11 +454,13 @@ async def cc_cmd(update, ctx):
     if not await check_force_join(update, ctx): return
     u = update.effective_user
     vip = is_vip(u.id)
+    gw_secili = ctx.user_data.get("cc_gateway", "Stripe")
     status = f"{E.VIP} VIP Aktif" if vip else f"{E.USER} Normal Üye"
     text = (
         f"{E.CARD} <b>CC Checker Paneli</b>\n\n"
         f"{E.STAR} Durumun: {status}\n"
-        f"{E.BOLT} Gateway sayısı: <b>{len(GATEWAYS)}</b>\n"
+        f"{E.GEAR} Seçili Gateway: <b>{gw_secili}</b>\n"
+        f"{E.BOLT} Toplam: <b>{len(GATEWAYS)}</b> gateway\n\n"
         f"{E.FIRE} Metod seç:"
     )
     await update.message.reply_text(text, reply_markup=cc_menu_kb(), parse_mode=ParseMode.HTML)
@@ -424,8 +477,7 @@ async def vip_cmd(update, ctx):
     else:
         text = (f"{E.VIP} <b>VIP Paneli</b>\n\n"
                 f"{E.DIAMOND} <b>Avantajlar:</b>\n"
-                f"• Tüm gateway'lere sınırsız erişim\n"
-                f"• VIP modu (15 gateway aynı anda)\n"
+                f"• Tüm gateway'lere erişim\n"
                 f"• 2x günlük bonus\n"
                 f"• Öncelikli destek\n\n"
                 f"{E.MONEY} Fiyat: <b>{VIP_PRICE}₺ / 30 gün</b>")
@@ -456,8 +508,7 @@ async def bonus_cmd(update, ctx):
         if now - last < timedelta(hours=24):
             k = timedelta(hours=24) - (now-last)
             h, m = k.seconds//3600, (k.seconds%3600)//60
-            await update.message.reply_text(f"{E.WARN} Kalan: <b>{h}s {m}dk</b>", parse_mode=ParseMode.HTML)
-            return
+            await update.message.reply_text(f"{E.WARN} Kalan: <b>{h}s {m}dk</b>", parse_mode=ParseMode.HTML); return
     amt = 10 if is_vip(u.id) else 5
     c = db(); cur = c.cursor()
     cur.execute("UPDATE users SET balance=balance+?, last_bonus=? WHERE user_id=?",
@@ -479,8 +530,7 @@ async def stats_cmd(update, ctx):
     c = db(); cur = c.cursor()
     cur.execute("SELECT COUNT(*) FROM users"); t = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM users WHERE vip_until > ?", (datetime.now().isoformat(),))
-    v = cur.fetchone()[0]
-    c.close()
+    v = cur.fetchone()[0]; c.close()
     await update.message.reply_text(
         f"{E.CHART} <b>İstatistik</b>\n{E.USER} Üye: <b>{t}</b>\n{E.VIP} VIP: <b>{v}</b>",
         parse_mode=ParseMode.HTML)
@@ -558,47 +608,58 @@ async def cb(update, ctx):
             await q.message.chat.send_message(f"{E.OK} Teşekkürler!", reply_markup=main_kb(uid))
         return
 
-    # ============ CC MENU ============
+    # ============ CC CHECKER ============
     if d == "cc_single":
+        gw = ctx.user_data.get("cc_gateway", "Stripe")
         ctx.user_data["cc_await"] = "single"
         await q.message.edit_text(
-            f"{E.CARD} Tekli CC gönder:\nFormat: <code>4111111111111111|12|2025|123</code>",
+            f"{E.CARD} <b>Tekli Check</b>\n"
+            f"{E.GEAR} Gateway: <b>{gw}</b>\n\n"
+            f"CC gönder:\n<code>4111111111111111|12|2025|123</code>",
             parse_mode=ParseMode.HTML); return
 
     if d == "cc_file":
+        gw = ctx.user_data.get("cc_gateway", "Stripe")
         ctx.user_data["cc_await"] = "file"
         await q.message.edit_text(
-            f"{E.FILE} .txt dosyası gönder (her satırda 1 CC)."); return
+            f"{E.FILE} <b>Dosyadan Check</b>\n"
+            f"{E.GEAR} Gateway: <b>{gw}</b>\n\n"
+            f"TXT dosyası gönder (her satır 1 CC)", parse_mode=ParseMode.HTML); return
 
     if d == "cc_multi":
+        gw = ctx.user_data.get("cc_gateway", "Stripe")
         ctx.user_data["cc_await"] = "multi"
         await q.message.edit_text(
-            f"{E.LIST} CC'leri virgülle ayırarak gönder."); return
+            f"{E.LIST} <b>Çoklu Check</b>\n"
+            f"{E.GEAR} Gateway: <b>{gw}</b>\n\n"
+            f"CC'leri virgülle ayırarak gönder", parse_mode=ParseMode.HTML); return
+
+    if d == "cc_gen":
+        ctx.user_data["cc_await"] = "gen"
+        await q.message.edit_text(
+            f"{E.DICE} <b>Gen (BIN)</b>\n\n"
+            f"BIN gönder:\n<code>411111</code>\n\n"
+            f"{E.INFO} İstersen: <code>411111 10</code> (10 adet)", parse_mode=ParseMode.HTML); return
 
     if d == "cc_gateway":
+        ctx.user_data["gateway_pick"] = True
         await q.message.edit_text(
-            f"{E.GEAR} <b>Gateway Seç</b>",
+            f"{E.GEAR} <b>Gateway Seç</b>\n\n"
+            f"{E.INFO} Tekli / Dosya / Çoklu check için kullanılacak gateway:",
             reply_markup=gateway_kb(), parse_mode=ParseMode.HTML); return
 
     if d.startswith("gw_"):
         key = d.split("_")[1]
-        if key == "done":
-            gw = ctx.user_data.get("cc_gateway", "Stripe")
+        if key == "all":
+            ctx.user_data["cc_gateway"] = "ALL"
             await q.message.edit_text(
-                f"{E.OK} Seçili: <b>{gw}</b>\n{E.CARD} Metod seç:",
+                f"{E.OK} Tüm 15 gateway seçildi!\n\n{E.CARD} Metod seç:",
                 reply_markup=cc_menu_kb(), parse_mode=ParseMode.HTML); return
         gw = GATEWAYS.get(key, ("Stripe",))[0]
         ctx.user_data["cc_gateway"] = gw
-        await q.answer(f"{gw} seçildi")
-        return
-
-    if d == "cc_all":
-        if not is_vip(uid) and not is_admin(uid):
-            await q.answer(f"{E.LOCK} VIP gerekli!", show_alert=True); return
-        ctx.user_data["cc_await"] = "single"
-        ctx.user_data["cc_gateway"] = "ALL"
-        await q.message.edit_text(f"{E.VIP} Tüm gateway'lere check için CC gönder:",
-                                   parse_mode=ParseMode.HTML); return
+        await q.message.edit_text(
+            f"{E.OK} <b>{gw}</b> seçildi!\n\n{E.CARD} Metod seç:",
+            reply_markup=cc_menu_kb(), parse_mode=ParseMode.HTML); return
 
     # ============ VIP ============
     if d == "vip_buy":
@@ -618,11 +679,9 @@ async def cb(update, ctx):
     if d == "vip_features":
         await q.message.edit_text(
             f"{E.STAR} <b>VIP Özellikleri</b>\n\n"
-            f"• {E.CARD} Tüm gateway erişimi\n"
-            f"• {E.BOLT} VIP Mod (15 gateway)\n"
-            f"• {E.GIFT} 2x bonus\n"
-            f"• {E.ROCKET} Öncelikli destek\n"
-            f"• {E.CROWN} Özel rozet",
+            f"• Tüm gateway erişimi\n"
+            f"• 2x bonus\n"
+            f"• Öncelikli destek",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{E.NO} Kapat", callback_data="close")]]),
             parse_mode=ParseMode.HTML); return
 
@@ -693,23 +752,18 @@ async def do_cc_check(update, ctx, cc_text, gateway):
     loop = asyncio.get_event_loop()
 
     if gateway == "ALL":
-        # Tüm gateway'ler
-        all_res = []
-        for k, (gw, ep) in GATEWAYS.items():
-            r = await loop.run_in_executor(None, check_single_cc, cc_text, gw)
-            if r: all_res.append(r)
-        # En iyi sonuç
-        rank = {"CHARGED":5,"LIVE":4,"UNKNOWN":3,"DEAD":2,"ERROR":1}
-        best = max(all_res, key=lambda x: rank.get(x["status"],0)) if all_res else None
-        text = f"{E.VIP} <b>VIP Mod Sonucu</b>\n\n"
-        for r in all_res: text += f"• {r['gateway']:15} → <b>{r['status']}</b>\n"
-        if best:
-            text += f"\n{E.CROWN} <b>En İyi:</b> {best['status']} ({best['gateway']})"
+        r = await loop.run_in_executor(None, check_all_gateways, cc_text)
+        if not r:
+            await msg.edit_text(f"{E.NO} Geçersiz CC formatı"); return
+        best = r["best"]
+        text = f"{E.VIP} <b>Tüm Gateway Sonucu</b>\n\n"
+        for res in r["all"]:
+            text += f"• {res['gateway']:15} → <b>{res['status']}</b>\n"
+        text += f"\n{E.CROWN} <b>En İyi:</b> {best['status']} ({best['gateway']})"
         await msg.edit_text(text, parse_mode=ParseMode.HTML)
-        # İstatistik
         c=db(); cur=c.cursor()
         cur.execute("UPDATE users SET total_checks=total_checks+1 WHERE user_id=?", (u.id,))
-        if best and best["status"] in ("CHARGED","LIVE"):
+        if best["status"] in ("CHARGED","LIVE"):
             cur.execute("UPDATE users SET hits=hits+1 WHERE user_id=?", (u.id,))
         c.commit(); c.close()
         return
@@ -748,7 +802,7 @@ async def msg(update, ctx):
             m = await update.message.reply_text(f"{E.CHECK} {len(lines)} CC kontrol ediliyor...")
             loop = asyncio.get_event_loop()
             results = []
-            for cc in lines[:50]:  # Limit
+            for cc in lines[:50]:
                 r = await loop.run_in_executor(None, check_single_cc, cc, gateway)
                 if r: results.append(r)
             charged = [r for r in results if r["status"]=="CHARGED"]
@@ -798,6 +852,22 @@ async def msg(update, ctx):
                         (len(results), len(charged)+len(live), u.id))
             c.commit(); c.close()
             return
+
+        if await_ == "gen":
+            parts = text.split()
+            bin_prefix = parts[0]
+            count = 1
+            if len(parts) > 1:
+                try: count = min(int(parts[1]), 50)
+                except: count = 1
+            bin_clean = re.sub(r'\D', '', bin_prefix)
+            if len(bin_clean) < 6:
+                await update.message.reply_text(f"{E.NO} BIN en az 6 hane!"); return
+            ccs = generate_cc(bin_clean, count)
+            if not ccs:
+                await update.message.reply_text(f"{E.NO} Üretilemedi!"); return
+            out = f"{E.DICE} <b>{count} CC Üretildi</b>\n\n<code>" + "\n".join(ccs) + "</code>"
+            await update.message.reply_text(out, parse_mode=ParseMode.HTML); return
 
         if await_ == "coupon":
             code = text.strip().upper()
@@ -878,6 +948,12 @@ async def msg(update, ctx):
 
     # Ana butonlar
     if text == f"{E.CARD} CC Checker": await cc_cmd(update, ctx); return
+    if text == f"{E.DICE} Gen (BIN)":
+        await update.message.reply_text(
+            f"{E.DICE} <b>Gen Komutu</b>\n\n"
+            f"<code>/gen 411111</code> → 1 CC\n"
+            f"<code>/gen 411111 10</code> → 10 CC",
+            parse_mode=ParseMode.HTML); return
     if text == f"{E.VIP} VIP Paneli":  await vip_cmd(update, ctx); return
     if text == f"{E.USER} Profilim":   await profil_cmd(update, ctx); return
     if text == f"{E.MONEY} Bakiye":
@@ -891,13 +967,12 @@ async def msg(update, ctx):
 # ==================== MAIN ====================
 def main():
     db_init()
-    if ADMIN_ID == 0:
-        print(f"{E.WARN} UYARI: ADMIN_ID = 0! Kod içinde ADMIN_ID'yi kendi Telegram ID'nle değiştir!")
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("cc", cc_cmd))
+    app.add_handler(CommandHandler("gen", gen_cmd))
     app.add_handler(CommandHandler("vip", vip_cmd))
     app.add_handler(CommandHandler("profil", profil_cmd))
     app.add_handler(CommandHandler("bonus", bonus_cmd))
@@ -913,7 +988,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, msg))
 
-    print(f"{E.BOLT} Bot başlatılıyor...")
+    log.info("Bot başlatılıyor...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
