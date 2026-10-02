@@ -20,7 +20,7 @@ from keep_alive import keep_alive
 keep_alive()
 
 # ==================== AYARLAR ====================
-BOT_TOKEN = "8892646618:AAF8uDMXTBTfnSUV03XJHUw98c-DccMKg_E"
+BOT_TOKEN = "8892646618:AAENeCk8RylIWVlM-2xWgI8jZAu1IfaHQ8E"
 ADMIN_ID  = 8838777079
 DB_FILE   = "cc_bot.db"
 FORCE_CHANNELS = []
@@ -39,7 +39,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # ==================== AYARLAR ====================
-BOT_TOKEN = "8892646618:AAF8uDMXTBTfnSUV03XJHUw98c-DccMKg_E"
+BOT_TOKEN = "8892646618:AAENeCk8RylIWVlM-2xWgI8jZAu1IfaHQ8E"
 ADMIN_ID  = 8838777079 # ⚠️ BURAYA SENİN TELEGRAM ID'Nİ YAZ (sadece o admin olacak)
 DB_FILE   = "cc_bot.db"
 FORCE_CHANNELS = []  # Ör: ["@kanal1", "@kanal2"]
